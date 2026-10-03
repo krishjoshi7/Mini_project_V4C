@@ -234,3 +234,4 @@ class AnalyticsManager(DatabaseConnection):
                WHERE e.is_current = TRUE
                GROUP BY d.department_name ORDER BY avg_attrition_risk DESC"""
         )
+    #commenta
