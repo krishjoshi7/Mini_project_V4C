@@ -1,0 +1,50 @@
+erDiagram
+    DEPARTMENTS ||--o{ EMPLOYEES : contains
+    EMPLOYEES ||--o{ EMPLOYEES : manages
+    DEPARTMENTS ||--o{ PROJECTS : owns
+    EMPLOYEES ||--o{ PROJECT_ASSIGNMENTS : receives
+    PROJECTS ||--o{ PROJECT_ASSIGNMENTS : includes
+    EMPLOYEES ||--o{ PERFORMANCE_REVIEWS : receives
+    EMPLOYEES ||--o{ PERFORMANCE_REVIEWS : manages
+
+    DEPARTMENTS {
+        int department_id PK
+        string department_name UK
+    }
+    EMPLOYEES {
+        bigint employee_id PK
+        string first_name
+        string last_name
+        string email UK
+        int department_id FK
+        bigint manager_id FK
+        string job_title
+        decimal salary
+        date hire_date
+        string status
+    }
+    PROJECTS {
+        bigint project_id PK
+        string project_name
+        int department_id FK
+        decimal budget
+        date start_date
+        date end_date
+        string status
+    }
+    PROJECT_ASSIGNMENTS {
+        bigint assignment_id PK
+        bigint employee_id FK
+        bigint project_id FK
+        decimal allocation_pct
+        date assigned_date
+    }
+    PERFORMANCE_REVIEWS {
+        bigint review_id PK
+        bigint employee_id FK
+        bigint manager_id FK
+        date review_date
+        decimal overall_score
+        string rating
+        string comments
+    }

@@ -1,0 +1,48 @@
+erDiagram
+    DIM_DATE ||--o{ FACT_PERFORMANCE_REVIEWS : dates
+    DIM_EMPLOYEE ||--o{ FACT_PERFORMANCE_REVIEWS : reviewed
+    DIM_DEPARTMENT ||--o{ FACT_PERFORMANCE_REVIEWS : attributed
+    DIM_PROJECT ||--o{ FACT_PERFORMANCE_REVIEWS : assigned_to
+    DIM_DEPARTMENT ||--o{ DIM_EMPLOYEE : classifies
+    DIM_DEPARTMENT ||--o{ DIM_PROJECT : owns
+
+    DIM_DATE {
+        int date_key PK
+        date full_date UK
+        smallint year_num
+        tinyint quarter_num
+        tinyint month_num
+        tinyint day_num
+    }
+    DIM_EMPLOYEE {
+        bigint employee_key PK
+        bigint employee_id NK
+        int department_key FK
+        string job_title
+        decimal salary
+        date start_date
+        date end_date
+        boolean is_current
+    }
+    DIM_DEPARTMENT {
+        int department_key PK
+        int department_id NK
+        string department_name
+    }
+    DIM_PROJECT {
+        bigint project_key PK
+        bigint project_id NK
+        int department_key FK
+        string project_name
+    }
+    FACT_PERFORMANCE_REVIEWS {
+        bigint fact_review_key PK
+        bigint review_id NK
+        bigint employee_key FK
+        int department_key FK
+        bigint project_key FK
+        int date_key FK
+        date review_date
+        decimal overall_score
+        string rating
+    }
