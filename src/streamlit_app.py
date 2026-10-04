@@ -114,11 +114,9 @@ def get_department_choices() -> list[dict]:
 
 def render_form_message(message: str, success: bool) -> None:
     if success:
-        st.toast(message, icon="✓")
         st.success(message)
     else:
         st.error(message)
-
 
 def render_department_field(departments: list[dict], key: str = "department") -> int:
     if departments:
@@ -193,7 +191,7 @@ def render_onboarding() -> None:
         employee = Employee(first_name=first_name, last_name=last_name, email=email, department_id=department_id, job_title=job_title, salary=float(salary))
         try:
             employee_id = EmployeeManager().create_employee(employee)
-            render_form_message(f"Employee {employee_id} added. The current warehouse version was created.", True)
+            render_form_message(f"Employee {employee_id} added. The current employee record was created.", True)
         except Exception as exc:
             render_form_message(f"Employee could not be added: {exc}", False)
 
@@ -313,7 +311,7 @@ def render_analytics() -> None:
             section_title("Year-over-year review score")
             fig = px.line(trend, x="review_year", y="avg_score", markers=True, labels={"review_year": "Year", "avg_score": "Average review score"})
             fig.update_traces(line={"color": COLORS["pink"], "width": 3}, marker={"color": COLORS["soft_pink"], "size": 9}, fill="tozeroy", fillcolor="rgba(185,58,150,.16)", hovertemplate="Year %{x}<br>Average review score %{y:.1f}<extra></extra>")
-            padding = max(1, (trend["avg_score"].max() - trend["avg_score"].min()) * .35)
+            padding = max(1, (float(trend["avg_score"].max()) - float(trend["avg_score"].min())) * 0.35)
             fig.update_layout(xaxis={"dtick": 1, "tickformat": "d", "title": "Year"}, yaxis={"range": [trend["avg_score"].min() - padding, trend["avg_score"].max() + padding], "title": "Average review score"})
             st.plotly_chart(style_fig(fig, 365), use_container_width=True, config={"displayModeBar": False})
             st.caption(f"Review scores moved {year_change:+.1f} points in the latest year.")
