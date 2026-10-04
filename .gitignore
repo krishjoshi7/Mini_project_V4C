@@ -1,5 +1,8 @@
-__pycache__/
-*.py[cod]
+# Python caches and bytecode
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
 .env
 .venv/
 venv/
