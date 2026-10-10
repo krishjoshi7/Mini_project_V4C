@@ -140,30 +140,53 @@ class EmployeeManager(DatabaseConnection):
         )
 
     def delete_employee(self, employee_id: int) -> None:
-        """Soft deletes the employee by setting status to 'inactive'."""
+        """Deactivate an employee while preserving reviews, assignments, and SCD2 history."""
         connection = self.get_connection()
         cursor = connection.cursor()
         today = date.today()
+
         try:
+            # Lock and verify the OLTP employee row before changing anything.
             cursor.execute(
-                "UPDATE employees SET status = 'inactive' WHERE employee_id = %s",
-                (employee_id,)
+                "SELECT employee_id, status FROM employees WHERE employee_id = %s FOR UPDATE",
+                (employee_id,),
             )
-            if cursor.rowcount == 0:
+            employee = cursor.fetchone()
+
+            if employee is None:
                 raise ValueError(f"Employee {employee_id} does not exist.")
-            
+
+            if employee["status"] == "inactive":
+                raise ValueError(f"Employee {employee_id} is already inactive.")
+
+            # Lock the current warehouse version, if one exists.
             cursor.execute(
-                "SELECT employee_key FROM dim_employee WHERE employee_id = %s AND is_current = TRUE FOR UPDATE",
-                (employee_id,)
+                """SELECT employee_key
+                   FROM dim_employee
+                   WHERE employee_id = %s AND is_current = TRUE
+                   FOR UPDATE""",
+                (employee_id,),
             )
             current = cursor.fetchone()
+
+            # Deactivate the OLTP record.
+            cursor.execute(
+                "UPDATE employees SET status = 'inactive' WHERE employee_id = %s",
+                (employee_id,),
+            )
+
+            # Close the current SCD Type 2 version. Do not delete prior versions.
             if current:
                 cursor.execute(
-                    "UPDATE dim_employee SET end_date = %s, is_current = FALSE WHERE employee_key = %s",
-                    (today, current["employee_key"])
+                    """UPDATE dim_employee
+                       SET end_date = %s, is_current = FALSE
+                       WHERE employee_key = %s""",
+                    (today, current["employee_key"]),
                 )
-            
+
+            # Keep existing performance reviews and project assignments for history.
             connection.commit()
+
         except Exception:
             connection.rollback()
             raise
@@ -190,13 +213,44 @@ class ProjectManager(DatabaseConnection):
         finally:
             cursor.close()
 
-    def assign_employee(self, employee_id: int, project_id: int, allocation_pct: float = 100) -> None:
+    def assign_employee(
+        self,
+        employee_id: int,
+        project_id: int,
+        allocation_pct: float = 100,
+    ) -> None:
         if not 0 < allocation_pct <= 100:
             raise ValueError("Allocation must be greater than 0 and at most 100 percent.")
+
+        employee = self.fetch_one(
+            "SELECT employee_id, status FROM employees WHERE employee_id = %s",
+            (employee_id,),
+        )
+        if employee is None:
+            raise ValueError(f"Employee {employee_id} does not exist.")
+        if employee["status"] != "active":
+            raise ValueError(
+                f"Employee {employee_id} is inactive and cannot be assigned to a new project."
+            )
+
+        project = self.fetch_one(
+            "SELECT project_id, status FROM projects WHERE project_id = %s",
+            (project_id,),
+        )
+        if project is None:
+            raise ValueError(f"Project {project_id} does not exist.")
+        if project["status"] != "active":
+            raise ValueError(
+                f"Project {project_id} is not active and cannot receive new assignments."
+            )
+
         cursor = self.execute(
-            """INSERT INTO project_assignments (employee_id, project_id, allocation_pct, assigned_date)
+            """INSERT INTO project_assignments
+               (employee_id, project_id, allocation_pct, assigned_date)
                VALUES (%s, %s, %s, %s)
-               ON DUPLICATE KEY UPDATE allocation_pct = VALUES(allocation_pct), assigned_date = VALUES(assigned_date)""",
+               ON DUPLICATE KEY UPDATE
+                   allocation_pct = VALUES(allocation_pct),
+                   assigned_date = VALUES(assigned_date)""",
             (employee_id, project_id, allocation_pct, date.today()),
             commit=True,
         )

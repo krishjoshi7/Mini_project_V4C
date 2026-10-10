@@ -310,15 +310,38 @@ def render_employees() -> None:
                     st.error(f"Failed to update employee: {exc}")
                     
             with st.container(border=True):
-                section_title("Danger zone")
-                if st.button("Delete employee (Make inactive)", type="primary", key="del_emp"):
+                section_title("Deactivate employee")
+                st.warning(
+                    "This marks the employee as inactive. It does not permanently delete "
+                    "the employee, performance reviews, project assignments, or historical versions."
+                )
+
+                confirm_deactivation = st.checkbox(
+                    f"I confirm that I want to deactivate {emp['first_name']} "
+                    f"{emp['last_name']} (ID: {emp['employee_id']}).",
+                    key=f"confirm_deactivate_{emp['employee_id']}",
+                )
+
+                if st.button(
+                    "Deactivate employee",
+                    type="primary",
+                    key=f"deactivate_employee_{emp['employee_id']}",
+                    disabled=not confirm_deactivation,
+                    use_container_width=True,
+                ):
                     try:
                         EmployeeManager().delete_employee(emp["employee_id"])
-                        st.success("Employee deleted (marked inactive).")
+                        st.success(
+                            f"{emp['first_name']} {emp['last_name']} has been deactivated. "
+                            "Historical records have been preserved."
+                        )
                         st.session_state.pop("selected_employee", None)
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Failed to delete employee: {exc}")
+                        st.error(f"Failed to deactivate employee: {exc}")
+
+                    
+            
 
 
 def render_projects() -> None:
