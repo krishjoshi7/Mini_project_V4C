@@ -352,11 +352,12 @@ class AnalyticsManager(DatabaseConnection):
             params.append(department_name)
             
         query = f"""SELECT p.project_id, p.project_name, d.department_name, p.budget,
-                      COUNT(a.employee_id) AS assigned_employees,
-                      COALESCE(SUM(a.allocation_pct), 0) AS total_allocation_pct
+                      COUNT(e.employee_id) AS assigned_employees,
+                      COALESCE(SUM(CASE WHEN e.employee_id IS NOT NULL THEN a.allocation_pct ELSE 0 END), 0) AS total_allocation_pct
                FROM projects p
                JOIN departments d ON p.department_id = d.department_id
                LEFT JOIN project_assignments a ON p.project_id = a.project_id
+               LEFT JOIN employees e ON a.employee_id = e.employee_id AND e.status = 'active'
                {where_clause}
                GROUP BY p.project_id, p.project_name, d.department_name, p.budget
                ORDER BY total_allocation_pct ASC, assigned_employees ASC
@@ -364,7 +365,7 @@ class AnalyticsManager(DatabaseConnection):
         return self.fetch_all(query, tuple(params) if params else None)
 
     def get_overview_metrics(self) -> dict[str, Any]:
-        total_employees = self.fetch_one("SELECT COUNT(*) as count FROM employees")["count"]
+        total_employees = self.fetch_one("SELECT COUNT(*) as count FROM employees WHERE status = 'active'")["count"]
         total_departments = self.fetch_one("SELECT COUNT(*) as count FROM departments")["count"]
         avg_score_row = self.fetch_one("SELECT AVG(overall_score) as avg_score FROM performance_reviews")
         avg_score = float(avg_score_row["avg_score"]) if avg_score_row["avg_score"] is not None else 0.0
@@ -373,6 +374,7 @@ class AnalyticsManager(DatabaseConnection):
             SELECT d.department_name, COUNT(e.employee_id) as size
             FROM employees e
             JOIN departments d ON e.department_id = d.department_id
+            WHERE e.status = 'active'
             GROUP BY d.department_name
             ORDER BY size ASC
         """)
