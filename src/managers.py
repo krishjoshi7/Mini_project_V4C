@@ -128,10 +128,47 @@ class EmployeeManager(DatabaseConnection):
 
     def list_employees(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.fetch_all(
-            "SELECT employee_id, first_name, last_name, email, department_id, job_title, salary "
-            "FROM employees ORDER BY employee_id DESC LIMIT %s",
+            "SELECT employee_id, first_name, last_name, email, department_id, job_title, salary, status "
+            "FROM employees WHERE status = 'active' ORDER BY employee_id DESC LIMIT %s",
             (limit,),
         )
+
+    def get_employee(self, employee_id: int) -> dict[str, Any] | None:
+        return self.fetch_one(
+            "SELECT * FROM employees WHERE employee_id = %s",
+            (employee_id,)
+        )
+
+    def delete_employee(self, employee_id: int) -> None:
+        """Soft deletes the employee by setting status to 'inactive'."""
+        connection = self.get_connection()
+        cursor = connection.cursor()
+        today = date.today()
+        try:
+            cursor.execute(
+                "UPDATE employees SET status = 'inactive' WHERE employee_id = %s",
+                (employee_id,)
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Employee {employee_id} does not exist.")
+            
+            cursor.execute(
+                "SELECT employee_key FROM dim_employee WHERE employee_id = %s AND is_current = TRUE FOR UPDATE",
+                (employee_id,)
+            )
+            current = cursor.fetchone()
+            if current:
+                cursor.execute(
+                    "UPDATE dim_employee SET end_date = %s, is_current = FALSE WHERE employee_key = %s",
+                    (today, current["employee_key"])
+                )
+            
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            cursor.close()
 
 
 class ProjectManager(DatabaseConnection):
@@ -165,6 +202,24 @@ class ProjectManager(DatabaseConnection):
         )
         cursor.close()
 
+    def get_project(self, project_id: int) -> dict[str, Any] | None:
+        return self.fetch_one("SELECT * FROM projects WHERE project_id = %s", (project_id,))
+
+    def list_projects(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.fetch_all("SELECT * FROM projects ORDER BY project_id DESC LIMIT %s", (limit,))
+
+    def update_project(self, project_id: int, project_name: str, budget: float, status: str) -> None:
+        cursor = self.execute(
+            "UPDATE projects SET project_name = %s, budget = %s, status = %s WHERE project_id = %s",
+            (project_name, budget, status, project_id),
+            commit=True,
+        )
+        cursor.close()
+
+    def delete_project(self, project_id: int) -> None:
+        cursor = self.execute("DELETE FROM projects WHERE project_id = %s", (project_id,), commit=True)
+        cursor.close()
+
 
 class ReviewManager(DatabaseConnection):
     def create_review(self, review: Review) -> int:
@@ -183,6 +238,24 @@ class ReviewManager(DatabaseConnection):
             return int(cursor.lastrowid)
         finally:
             cursor.close()
+
+    def get_review(self, review_id: int) -> dict[str, Any] | None:
+        return self.fetch_one("SELECT * FROM performance_reviews WHERE review_id = %s", (review_id,))
+
+    def list_reviews(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self.fetch_all("SELECT * FROM performance_reviews ORDER BY review_date DESC LIMIT %s", (limit,))
+
+    def delete_review(self, review_id: int) -> None:
+        cursor = self.execute("DELETE FROM performance_reviews WHERE review_id = %s", (review_id,), commit=True)
+        cursor.close()
+
+    def update_review(self, review_id: int, overall_score: float, rating: str, comments: str) -> None:
+        cursor = self.execute(
+            "UPDATE performance_reviews SET overall_score = %s, rating = %s, comments = %s WHERE review_id = %s",
+            (overall_score, rating, comments, review_id),
+            commit=True,
+        )
+        cursor.close()
 
 
 class AnalyticsManager(DatabaseConnection):
@@ -233,6 +306,20 @@ class AnalyticsManager(DatabaseConnection):
                JOIN dim_department d ON d.department_key = e.department_key
                WHERE e.is_current = TRUE
                GROUP BY d.department_name ORDER BY avg_attrition_risk DESC"""
+        )
+
+    def get_project_bottlenecks(self) -> list[dict[str, Any]]:
+        return self.fetch_all(
+            """SELECT p.project_id, p.project_name, d.department_name, p.budget,
+                      COUNT(a.employee_id) AS assigned_employees,
+                      COALESCE(SUM(a.allocation_pct), 0) AS total_allocation_pct
+               FROM projects p
+               JOIN departments d ON p.department_id = d.department_id
+               LEFT JOIN project_assignments a ON p.project_id = a.project_id
+               WHERE p.status = 'active'
+               GROUP BY p.project_id, p.project_name, d.department_name, p.budget
+               ORDER BY total_allocation_pct ASC, assigned_employees ASC
+               LIMIT 10"""
         )
 
     def get_overview_metrics(self) -> dict[str, Any]:
