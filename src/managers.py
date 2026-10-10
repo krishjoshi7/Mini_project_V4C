@@ -259,13 +259,7 @@ class ReviewManager(DatabaseConnection):
 
 
 class AnalyticsManager(DatabaseConnection):
-    def get_performance_trends(self) -> list[dict[str, Any]]:
-        return self.fetch_all(
-            """SELECT YEAR(review_date) AS review_year, AVG(overall_score) AS avg_score
-               FROM fact_performance_reviews GROUP BY YEAR(review_date) ORDER BY review_year"""
-        )
-
-    def get_top_performers(self, department_basis: str = "review") -> list[dict[str, Any]]:
+    def get_performance_trends(self, department_basis: str = "review", department_name: str | None = None) -> list[dict[str, Any]]:
         employee_join = {
             "review": """JOIN dim_employee e
                 ON e.employee_id = f.employee_id
@@ -276,6 +270,42 @@ class AnalyticsManager(DatabaseConnection):
         }
         if department_basis not in employee_join:
             raise ValueError("department_basis must be 'review' or 'current'")
+            
+        where_clause = ""
+        params = []
+        if department_name and department_name != "All departments":
+            where_clause = "WHERE d.department_name = %s"
+            params.append(department_name)
+            
+        query = f"""
+            SELECT YEAR(f.review_date) AS review_year, AVG(f.overall_score) AS avg_score
+            FROM fact_performance_reviews f
+            {employee_join[department_basis]}
+            JOIN dim_department d ON d.department_key = e.department_key
+            {where_clause}
+            GROUP BY YEAR(f.review_date)
+            ORDER BY review_year
+        """
+        return self.fetch_all(query, tuple(params) if params else None)
+
+    def get_top_performers(self, department_basis: str = "review", department_name: str | None = None) -> list[dict[str, Any]]:
+        employee_join = {
+            "review": """JOIN dim_employee e
+                ON e.employee_id = f.employee_id
+                AND f.review_date >= e.start_date
+                AND (e.end_date IS NULL OR f.review_date < e.end_date)""",
+            "current": """JOIN dim_employee e
+                ON e.employee_id = f.employee_id AND e.is_current = TRUE""",
+        }
+        if department_basis not in employee_join:
+            raise ValueError("department_basis must be 'review' or 'current'")
+            
+        where_clause = ""
+        params = []
+        if department_name and department_name != "All departments":
+            where_clause = "WHERE d.department_name = %s"
+            params.append(department_name)
+            
         query = f"""
             WITH employee_scores AS (
                 SELECT f.employee_id, e.first_name, e.last_name,
@@ -283,6 +313,7 @@ class AnalyticsManager(DatabaseConnection):
                 FROM fact_performance_reviews f
                 {employee_join[department_basis]}
                 JOIN dim_department d ON d.department_key = e.department_key
+                {where_clause}
                 GROUP BY f.employee_id, e.first_name, e.last_name, d.department_name
             ), ranked AS (
                 SELECT employee_id, first_name, last_name, department_name, overall_score,
@@ -295,32 +326,42 @@ class AnalyticsManager(DatabaseConnection):
             WHERE department_rank <= 5
             ORDER BY department_name, department_rank, employee_id
         """
-        return self.fetch_all(query)
+        return self.fetch_all(query, tuple(params) if params else None)
 
-    def get_attrition_risk(self) -> list[dict[str, Any]]:
-        return self.fetch_all(
-            """SELECT d.department_name, COUNT(*) AS employees,
+    def get_attrition_risk(self, department_name: str | None = None) -> list[dict[str, Any]]:
+        where_clause = "WHERE e.is_current = TRUE"
+        params = []
+        if department_name and department_name != "All departments":
+            where_clause += " AND d.department_name = %s"
+            params.append(department_name)
+            
+        query = f"""SELECT d.department_name, COUNT(*) AS employees,
                       AVG(e.performance_score) AS avg_performance,
                       AVG(e.attrition_risk) AS avg_attrition_risk
                FROM dim_employee e
                JOIN dim_department d ON d.department_key = e.department_key
-               WHERE e.is_current = TRUE
+               {where_clause}
                GROUP BY d.department_name ORDER BY avg_attrition_risk DESC"""
-        )
+        return self.fetch_all(query, tuple(params) if params else None)
 
-    def get_project_bottlenecks(self) -> list[dict[str, Any]]:
-        return self.fetch_all(
-            """SELECT p.project_id, p.project_name, d.department_name, p.budget,
+    def get_project_bottlenecks(self, department_name: str | None = None) -> list[dict[str, Any]]:
+        where_clause = "WHERE p.status = 'active'"
+        params = []
+        if department_name and department_name != "All departments":
+            where_clause += " AND d.department_name = %s"
+            params.append(department_name)
+            
+        query = f"""SELECT p.project_id, p.project_name, d.department_name, p.budget,
                       COUNT(a.employee_id) AS assigned_employees,
                       COALESCE(SUM(a.allocation_pct), 0) AS total_allocation_pct
                FROM projects p
                JOIN departments d ON p.department_id = d.department_id
                LEFT JOIN project_assignments a ON p.project_id = a.project_id
-               WHERE p.status = 'active'
+               {where_clause}
                GROUP BY p.project_id, p.project_name, d.department_name, p.budget
                ORDER BY total_allocation_pct ASC, assigned_employees ASC
                LIMIT 10"""
-        )
+        return self.fetch_all(query, tuple(params) if params else None)
 
     def get_overview_metrics(self) -> dict[str, Any]:
         total_employees = self.fetch_one("SELECT COUNT(*) as count FROM employees")["count"]

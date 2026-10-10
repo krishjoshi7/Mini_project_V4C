@@ -48,7 +48,7 @@ def load_local_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     return employees, history, reviews
 
 
-def local_analytics(department_basis: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def local_analytics(department_basis: str, department_name: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     employees, history, reviews = load_local_data()
     if employees.empty:
         trend = pd.DataFrame({"review_year": [2023, 2024, 2025], "avg_score": [82.4, 85.1, 87.6]})
@@ -80,6 +80,10 @@ def local_analytics(department_basis: str) -> tuple[pd.DataFrame, pd.DataFrame, 
                 "total_allocation_pct": [50, 150],
             }
         )
+        if department_name and department_name != "All departments":
+            top = top[top["department_name"] == department_name]
+            risk = risk[risk["department_name"] == department_name]
+            bottlenecks = bottlenecks[bottlenecks["department_name"] == department_name]
         return trend, top, risk, bottlenecks
 
     if department_basis == "review":
@@ -95,6 +99,9 @@ def local_analytics(department_basis: str) -> tuple[pd.DataFrame, pd.DataFrame, 
 
     identity = employees[["employee_id", "first_name", "last_name"]]
     review_rows = review_rows.merge(identity, on="employee_id", how="left", validate="many_to_one")
+    
+    if department_name and department_name != "All departments":
+        review_rows = review_rows[review_rows["department_name"] == department_name]
     trend = (
         review_rows.assign(review_year=review_rows["review_date"].dt.year)
         .groupby("review_year", as_index=False)["overall_score"]
@@ -109,6 +116,9 @@ def local_analytics(department_basis: str) -> tuple[pd.DataFrame, pd.DataFrame, 
     top = top[top["department_rank"] <= 5].sort_values(["department_name", "department_rank"])
 
     current_history = history[history["is_current"].astype(bool)]
+    if department_name and department_name != "All departments":
+        current_history = current_history[current_history["department_name"] == department_name]
+        
     risk = (
         current_history.groupby("department_name", as_index=False)
         .agg(
@@ -496,39 +506,51 @@ def render_reviews() -> None:
 
 def render_analytics() -> None:
     page_header("Performance <span class='gradient-text'>analytics</span>", "Read workforce momentum, high performers, and risk at a glance")
-    department_label = st.radio(
-        "Attribute reviews to",
-        ["Department at time of review", "Current department"],
-        horizontal=True,
-        help="Historical attribution uses the employee dimension version effective on the review date.",
-    )
+    
+    ctrl_col1, ctrl_col2 = st.columns([1, 1])
+    with ctrl_col1:
+        department_label = st.radio(
+            "Attribute reviews to",
+            ["Department at time of review", "Current department"],
+            horizontal=True,
+            help="Historical attribution uses the employee dimension version effective on the review date.",
+        )
+    
     department_basis = "review" if department_label == "Department at time of review" else "current"
+    
+    departments_list = get_department_choices()
+    dept_names = ["All departments"] + sorted([d["department_name"] for d in departments_list])
+    
+    with ctrl_col2:
+        selected_department = st.selectbox("Filter dashboard by department", dept_names)
+        
     analytics = AnalyticsManager()
     try:
-        trend = pd.DataFrame(analytics.get_performance_trends())
-    except Exception:
+        trend = pd.DataFrame(analytics.get_performance_trends(department_basis, selected_department))
+    except Exception as e:
+        st.error(f"Trend error: {e}")
         trend = pd.DataFrame()
     try:
-        top = pd.DataFrame(analytics.get_top_performers(department_basis))
-    except Exception:
+        top = pd.DataFrame(analytics.get_top_performers(department_basis, selected_department))
+    except Exception as e:
+        st.error(f"Top error: {e}")
         top = pd.DataFrame()
     try:
-        risk = pd.DataFrame(analytics.get_attrition_risk())
-    except Exception:
+        risk = pd.DataFrame(analytics.get_attrition_risk(selected_department))
+    except Exception as e:
+        st.error(f"Risk error: {e}")
         risk = pd.DataFrame()
     try:
-        bottlenecks = pd.DataFrame(analytics.get_project_bottlenecks())
-    except Exception:
+        bottlenecks = pd.DataFrame(analytics.get_project_bottlenecks(selected_department))
+    except Exception as e:
+        st.error(f"Bottlenecks error: {e}")
         bottlenecks = pd.DataFrame()
         
-    local_fallback = trend.empty or top.empty or risk.empty or bottlenecks.empty
+    # Show info pill if any query threw an exception (causing the df to be explicitly empty in our except blocks)
+    # but don't fallback to local CSV data just because a department has no records in a specific table.
+    local_fallback = trend.empty and top.empty and risk.empty and bottlenecks.empty
     if local_fallback:
-        local_trend, local_top, local_risk, local_bottlenecks = local_analytics(department_basis)
-        trend = trend if not trend.empty else local_trend
-        top = top if not top.empty else local_top
-        risk = risk if not risk.empty else local_risk
-        bottlenecks = bottlenecks if not bottlenecks.empty else local_bottlenecks
-        info_pill("Showing local synthetic analytics for any view not available from MySQL")
+        info_pill("Showing synthetic analytics for any view not available from MySQL")
 
     latest_score = float(trend.iloc[-1]["avg_score"]) if not trend.empty else 0
     year_change = float(trend.iloc[-1]["avg_score"] - trend.iloc[-2]["avg_score"]) if len(trend) > 1 else 0
@@ -551,14 +573,13 @@ def render_analytics() -> None:
             fig = px.line(trend, x="review_year", y="avg_score", markers=True, labels={"review_year": "Year", "avg_score": "Average review score"})
             fig.update_traces(line={"color": COLORS["pink"], "width": 3}, marker={"color": COLORS["soft_pink"], "size": 9}, fill="tozeroy", fillcolor="rgba(185,58,150,.16)", hovertemplate="Year %{x}<br>Average review score %{y:.1f}<extra></extra>")
             padding = max(1, (float(trend["avg_score"].max()) - float(trend["avg_score"].min())) * 0.35)
-            fig.update_layout(xaxis={"dtick": 1, "tickformat": "d", "title": "Year"}, yaxis={"range": [trend["avg_score"].min() - padding, trend["avg_score"].max() + padding], "title": "Average review score"})
+            y_min = float(trend["avg_score"].min()) - padding
+            y_max = float(trend["avg_score"].max()) + padding
+            fig.update_layout(xaxis={"dtick": 1, "tickformat": "d", "title": "Year"}, yaxis={"range": [y_min, y_max], "title": "Average review score"})
             st.plotly_chart(style_fig(fig, 365), use_container_width=True, config={"displayModeBar": False})
             st.caption(f"Review scores moved {year_change:+.1f} points in the latest year.")
     if not top.empty:
-        top = top.copy()
-        departments = ["All departments"] + sorted(top["department_name"].dropna().unique().tolist())
-        selected_department = chart_columns[1].selectbox("Filter top performers", departments)
-        filtered_top = top if selected_department == "All departments" else top[top["department_name"] == selected_department]
+        filtered_top = top.copy()
         filtered_top = filtered_top.sort_values("overall_score", ascending=True).tail(10)
         filtered_top["employee_name"] = filtered_top["first_name"] + " " + filtered_top["last_name"]
         with chart_columns[1].container(border=True):
@@ -589,7 +610,30 @@ def render_analytics() -> None:
     if not bottlenecks.empty:
         with st.container(border=True):
             section_title("Project bottlenecks")
-            st.caption("Active projects with low allocation or high resource shortage.")
+            
+            # Interactive Chart for Bottlenecks
+            bottlenecks["budget"] = pd.to_numeric(bottlenecks["budget"], errors="coerce").fillna(0)
+            fig = px.scatter(
+                bottlenecks, 
+                x="assigned_employees", 
+                y="total_allocation_pct", 
+                color="department_name",
+                size="budget",
+                hover_name="project_name",
+                hover_data={"project_id": True, "department_name": False, "budget": ":$,.0f", "assigned_employees": True, "total_allocation_pct": True},
+                labels={
+                    "assigned_employees": "Assigned Employees", 
+                    "total_allocation_pct": "Total Allocation %", 
+                    "department_name": "Department",
+                    "budget": "Budget"
+                },
+                color_discrete_sequence=COLOURWAY,
+                title="Resource Allocation by Project"
+            )
+            fig.update_layout(xaxis_title="Assigned Employees", yaxis_title="Total Allocation % (across all employees)", showlegend=True)
+            st.plotly_chart(style_fig(fig, 390), use_container_width=True, config={"displayModeBar": False})
+            st.caption("Active projects with low total allocation or headcount indicate potential resource bottlenecks. Bubble size corresponds to project budget.")
+
             display_bottlenecks = bottlenecks.copy()
             display_bottlenecks.columns = ["Project ID", "Project Name", "Department", "Budget", "Assigned Employees", "Total Allocation %"]
             st.dataframe(display_bottlenecks, hide_index=True, use_container_width=True)
