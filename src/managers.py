@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from src.database.db_manager import DatabaseConnection
@@ -67,7 +67,7 @@ class EmployeeManager(DatabaseConnection):
     ) -> None:
         connection = self.get_connection()
         cursor = connection.cursor()
-        today = date.today()
+        effective_time = datetime.now()
         try:
             cursor.execute(
                 "SELECT * FROM employees WHERE employee_id = %s FOR UPDATE",
@@ -92,8 +92,6 @@ class EmployeeManager(DatabaseConnection):
             current = cursor.fetchone()
             if current is None:
                 raise ValueError(f"Current warehouse version for employee {employee_id} is missing.")
-            if current["start_date"] == today:
-                raise ValueError("An employee can have only one SCD2 change per day.")
             if (
                 current["department_key"] == department["department_key"]
                 and float(current["salary"]) == float(next_salary)
@@ -102,7 +100,7 @@ class EmployeeManager(DatabaseConnection):
                 return
             cursor.execute(
                 "UPDATE dim_employee SET end_date = %s, is_current = FALSE WHERE employee_key = %s",
-                (today, current["employee_key"]),
+                (effective_time, current["employee_key"]),
             )
             cursor.execute(
                 "UPDATE employees SET department_id = %s, salary = %s WHERE employee_id = %s",
@@ -116,7 +114,7 @@ class EmployeeManager(DatabaseConnection):
                 (
                     employee_id, employee["first_name"], employee["last_name"], employee["email"],
                     department["department_key"], current["job_title"], employee["hire_date"],
-                    next_salary, today,
+                    next_salary, effective_time,
                 ),
             )
             connection.commit()
