@@ -3,6 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
+from src.validators import (
+    validate_comment,
+    validate_email,
+    validate_job_title,
+    validate_name,
+    validate_rating,
+    validate_salary,
+    validate_score,
+    validate_project_name,
+    validate_project_status,
+)
+
 
 @dataclass
 class Employee:
@@ -18,12 +30,13 @@ class Employee:
     status: str = "active"
 
     def validate(self) -> None:
-        if not self.first_name.strip() or not self.last_name.strip():
-            raise ValueError("Employee name is required.")
-        if "@" not in self.email:
-            raise ValueError("Enter a valid email address.")
-        if self.department_id < 1 or self.salary <= 0:
-            raise ValueError("Department and salary must be valid positive values.")
+        self.first_name = validate_name(self.first_name, "First name")
+        self.last_name  = validate_name(self.last_name,  "Last name")
+        self.email      = validate_email(self.email)
+        self.job_title  = validate_job_title(self.job_title)
+        self.salary     = validate_salary(self.salary)
+        if self.department_id < 1:
+            raise ValueError("Department must be a valid positive ID.")
 
 
 @dataclass
@@ -37,10 +50,14 @@ class Project:
     status: str = "active"
 
     def validate(self) -> None:
-        if not self.project_name.strip():
-            raise ValueError("Project name is required.")
-        if self.department_id < 1 or self.budget < 0:
-            raise ValueError("Department must be positive and budget cannot be negative.")
+        self.project_name = validate_project_name(self.project_name)
+        self.status       = validate_project_status(self.status)
+        if self.department_id < 1:
+            raise ValueError("Department must be a valid positive ID.")
+        if self.budget < 0:
+            raise ValueError("Budget cannot be negative.")
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("End date cannot be before start date.")
 
 
 @dataclass
@@ -54,6 +71,7 @@ class Review:
 
     def validate(self) -> None:
         if self.employee_id < 1:
-            raise ValueError("Employee ID is required.")
-        if not 0 <= self.overall_score <= 100:
-            raise ValueError("Review score must be between 0 and 100.")
+            raise ValueError("Employee ID must be a positive integer.")
+        self.overall_score = validate_score(self.overall_score)
+        self.rating        = validate_rating(self.rating)
+        self.comments      = validate_comment(self.comments)

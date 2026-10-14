@@ -5,6 +5,15 @@ from typing import Any
 
 from src.database.db_manager import DatabaseConnection
 from src.models import Employee, Project, Review
+from src.validators import (
+    validate_allocation,
+    validate_department_basis,
+    validate_project_budget_change,
+    validate_project_name,
+    validate_project_status,
+    validate_salary,
+    validate_salary_hike,
+)
 
 
 class EmployeeManager(DatabaseConnection):
@@ -55,15 +64,25 @@ class EmployeeManager(DatabaseConnection):
         self._apply_scd2_change(employee_id, department_id=new_department_id)
 
     def update_salary(self, employee_id: int, new_salary: float) -> None:
-        if new_salary <= 0:
-            raise ValueError("Salary must be greater than zero.")
+        new_salary = validate_salary(float(new_salary))
+        employee = self.get_employee(employee_id)
+        if employee is None:
+            raise ValueError(f"Employee {employee_id} does not exist.")
+        validate_salary_hike(float(employee["salary"]), new_salary)
         self._apply_scd2_change(employee_id, salary=new_salary)
+
+    def update_job_title(self, employee_id: int, new_job_title: str) -> None:
+        """Update the job title and record an SCD2 change in the warehouse."""
+        from src.validators import validate_job_title
+        new_job_title = validate_job_title(new_job_title)
+        self._apply_scd2_change(employee_id, job_title=new_job_title)
 
     def _apply_scd2_change(
         self,
         employee_id: int,
         department_id: int | None = None,
         salary: float | None = None,
+        job_title: str | None = None,
     ) -> None:
         connection = self.get_connection()
         cursor = connection.cursor()
@@ -76,8 +95,11 @@ class EmployeeManager(DatabaseConnection):
             employee = cursor.fetchone()
             if employee is None:
                 raise ValueError(f"Employee {employee_id} does not exist.")
-            next_department_id = department_id or employee["department_id"]
+            next_department_id = department_id if department_id is not None else employee["department_id"]
+            if salary is not None:
+                validate_salary_hike(float(employee["salary"]), float(salary))
             next_salary = salary if salary is not None else employee["salary"]
+            next_job_title = job_title if job_title is not None else employee["job_title"]
             cursor.execute(
                 "SELECT department_key FROM dim_department WHERE department_id = %s",
                 (next_department_id,),
@@ -94,20 +116,25 @@ class EmployeeManager(DatabaseConnection):
                 raise ValueError(f"Current warehouse version for employee {employee_id} is missing.")
             if current["start_date"] == today:
                 raise ValueError("An employee can have only one SCD2 change per day.")
+            # Skip write if nothing actually changed
             if (
                 current["department_key"] == department["department_key"]
                 and float(current["salary"]) == float(next_salary)
+                and current["job_title"] == next_job_title
             ):
                 connection.rollback()
                 return
+            # Close current warehouse version
             cursor.execute(
                 "UPDATE dim_employee SET end_date = %s, is_current = FALSE WHERE employee_key = %s",
                 (today, current["employee_key"]),
             )
+            # Update OLTP record
             cursor.execute(
-                "UPDATE employees SET department_id = %s, salary = %s WHERE employee_id = %s",
-                (next_department_id, next_salary, employee_id),
+                "UPDATE employees SET department_id = %s, salary = %s, job_title = %s WHERE employee_id = %s",
+                (next_department_id, next_salary, next_job_title, employee_id),
             )
+            # Insert new warehouse version
             cursor.execute(
                 """INSERT INTO dim_employee
                    (employee_id, first_name, last_name, email, department_key, job_title,
@@ -115,7 +142,7 @@ class EmployeeManager(DatabaseConnection):
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, TRUE, 0)""",
                 (
                     employee_id, employee["first_name"], employee["last_name"], employee["email"],
-                    department["department_key"], current["job_title"], employee["hire_date"],
+                    department["department_key"], next_job_title, employee["hire_date"],
                     next_salary, today,
                 ),
             )
@@ -219,8 +246,7 @@ class ProjectManager(DatabaseConnection):
         project_id: int,
         allocation_pct: float = 100,
     ) -> None:
-        if not 0 < allocation_pct <= 100:
-            raise ValueError("Allocation must be greater than 0 and at most 100 percent.")
+        allocation_pct = validate_allocation(allocation_pct)
 
         employee = self.fetch_one(
             "SELECT employee_id, status FROM employees WHERE employee_id = %s",
@@ -263,6 +289,12 @@ class ProjectManager(DatabaseConnection):
         return self.fetch_all("SELECT * FROM projects ORDER BY project_id DESC LIMIT %s", (limit,))
 
     def update_project(self, project_id: int, project_name: str, budget: float, status: str) -> None:
+        project_name = validate_project_name(project_name)
+        validate_project_status(status)
+        current = self.get_project(project_id)
+        if current is None:
+            raise ValueError(f"Project {project_id} does not exist.")
+        budget = validate_project_budget_change(float(current["budget"]), float(budget))
         cursor = self.execute(
             "UPDATE projects SET project_name = %s, budget = %s, status = %s WHERE project_id = %s",
             (project_name, budget, status, project_id),
@@ -314,6 +346,7 @@ class ReviewManager(DatabaseConnection):
 
 class AnalyticsManager(DatabaseConnection):
     def get_performance_trends(self, department_basis: str = "review", department_name: str | None = None) -> list[dict[str, Any]]:
+        department_basis = validate_department_basis(department_basis)
         employee_join = {
             "review": """JOIN dim_employee e
                 ON e.employee_id = f.employee_id
@@ -343,6 +376,7 @@ class AnalyticsManager(DatabaseConnection):
         return self.fetch_all(query, tuple(params) if params else None)
 
     def get_top_performers(self, department_basis: str = "review", department_name: str | None = None) -> list[dict[str, Any]]:
+        department_basis = validate_department_basis(department_basis)
         employee_join = {
             "review": """JOIN dim_employee e
                 ON e.employee_id = f.employee_id
