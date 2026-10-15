@@ -12,6 +12,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from src.exceptions import user_facing_error
 from src.managers import AnalyticsManager, EmployeeManager, ProjectManager, ReviewManager
 from src.models import Employee, Project, Review
 from src.config.job_titles import DEPT_JOB_TITLES
@@ -327,7 +328,7 @@ def render_employees() -> None:
                     st.session_state.pop("selected_employee", None)
                     st.error("Employee not found.")
             except Exception as exc:
-                 st.error(f"Error fetching employee: {exc}")
+                 st.error(f"Error fetching employee: {user_facing_error(exc)}")
                  
         if "selected_employee" in st.session_state:
             emp = st.session_state["selected_employee"]
@@ -575,7 +576,7 @@ def render_projects() -> None:
                 ProjectManager().assign_employee(int(assign_emp_id), int(assign_proj_id), float(allocation))
                 render_form_message("Project allocation saved.", True)
             except Exception as exc:
-                render_form_message(f"Allocation could not be saved: {exc}", False)
+                render_form_message(f"Allocation could not be saved: {user_facing_error(exc)}", False)
 
     with manage_tab:
         with st.container(border=True):
@@ -594,7 +595,7 @@ def render_projects() -> None:
                     st.session_state.pop("selected_project", None)
                     st.error("Project not found.")
             except Exception as exc:
-                st.error(f"Error fetching project: {exc}")
+                st.error(f"Error fetching project: {user_facing_error(exc)}")
                 
         if "selected_project" in st.session_state:
             proj = st.session_state["selected_project"]
@@ -613,36 +614,24 @@ def render_projects() -> None:
                     update_btn = st.form_submit_button("Save changes", type="primary", use_container_width=True)
                     
             if update_btn:
-                errors = validate_project_update_form(
-                    project_name=new_name,
-                    current_budget=float(proj["budget"]),
-                    new_budget=float(new_budget),
-                    status=new_status,
-                )
-                if errors:
-                    for err in errors:
-                        st.error(err)
-                else:
+                try:
+                    ProjectManager().update_project(proj["project_id"], new_name, float(new_budget), new_status)
+                    st.success("Project updated successfully!")
+                    st.session_state["selected_project"] = ProjectManager().get_project(proj["project_id"])
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to update project: {user_facing_error(exc)}")
+                    
+            with st.container(border=True):
+                section_title("Danger zone")
+                if st.button("Delete project", type="primary", key="del_proj"):
                     try:
                         ProjectManager().update_project(proj["project_id"], new_name, float(new_budget), new_status)
                         st.success("Project updated successfully!")
                         st.session_state["selected_project"] = ProjectManager().get_project(proj["project_id"])
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Failed to update project: {exc}")
-                    
-            # Only Super Admin can delete projects
-            if rbac.can(_user["role"], "project.delete"):
-                with st.container(border=True):
-                    section_title("Danger zone")
-                    if st.button("Delete project", type="primary", key="del_proj"):
-                        try:
-                            ProjectManager().delete_project(proj["project_id"])
-                            st.success("Project deleted.")
-                            st.session_state.pop("selected_project", None)
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(f"Failed to delete project: {exc}")
+                        st.error(f"Failed to delete project: {user_facing_error(exc)}")
 
 def render_reviews() -> None:
     page_header("Performance <span class='gradient-text'>reviews</span>", "Capture a clear, consistent view of employee performance")
@@ -704,7 +693,7 @@ def render_reviews() -> None:
                     st.session_state.pop("selected_review", None)
                     st.error("Review not found.")
             except Exception as exc:
-                st.error(f"Error fetching review: {exc}")
+                st.error(f"Error fetching review: {user_facing_error(exc)}")
                 
         if "selected_review" in st.session_state:
             rev = st.session_state["selected_review"]
@@ -727,7 +716,7 @@ def render_reviews() -> None:
                     st.session_state["selected_review"] = ReviewManager().get_review(rev["review_id"])
                     st.rerun()
                 except Exception as exc:
-                    st.error(f"Failed to update review: {exc}")
+                    st.error(f"Failed to update review: {user_facing_error(exc)}")
                     
             # Only Super Admin and HR Admin can delete reviews
             if rbac.can(_user["role"], "review.delete"):
@@ -762,22 +751,22 @@ def render_analytics() -> None:
     try:
         trend = pd.DataFrame(analytics.get_performance_trends(department_basis, selected_department))
     except Exception as e:
-        st.error(f"Trend error: {e}")
+        st.error(f"Trend error: {user_facing_error(e)}")
         trend = pd.DataFrame()
     try:
         top = pd.DataFrame(analytics.get_top_performers(department_basis, selected_department))
     except Exception as e:
-        st.error(f"Top error: {e}")
+        st.error(f"Top error: {user_facing_error(e)}")
         top = pd.DataFrame()
     try:
         risk = pd.DataFrame(analytics.get_attrition_risk(selected_department))
     except Exception as e:
-        st.error(f"Risk error: {e}")
+        st.error(f"Risk error: {user_facing_error(e)}")
         risk = pd.DataFrame()
     try:
         bottlenecks = pd.DataFrame(analytics.get_project_bottlenecks(selected_department))
     except Exception as e:
-        st.error(f"Bottlenecks error: {e}")
+        st.error(f"Bottlenecks error: {user_facing_error(e)}")
         bottlenecks = pd.DataFrame()
         
     # Show info pill if any query threw an exception (causing the df to be explicitly empty in our except blocks)
@@ -940,4 +929,4 @@ elif page == "Performance Reviews":
 else:
     render_analytics()
 
-#commend
+#comme

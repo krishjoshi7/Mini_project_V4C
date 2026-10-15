@@ -1,3 +1,4 @@
+DROP DATABASE IF EXISTS employee_analytics;
 CREATE DATABASE IF NOT EXISTS employee_analytics;
 USE employee_analytics;
 
@@ -76,8 +77,8 @@ CREATE TABLE IF NOT EXISTS dim_employee (
     salary DECIMAL(12, 2) NOT NULL,
     performance_score DECIMAL(5, 2) NOT NULL DEFAULT 0,
     attrition_risk TINYINT UNSIGNED NOT NULL DEFAULT 0,
-    start_date DATE NOT NULL,
-    end_date DATE NULL,
+    start_date DATETIME NOT NULL,
+    end_date DATETIME NULL,
     is_current BOOLEAN NOT NULL DEFAULT TRUE,
     CONSTRAINT fk_dim_employee_department FOREIGN KEY (department_key) REFERENCES dim_department(department_key),
     CONSTRAINT uq_dim_employee_version UNIQUE (employee_id, start_date),
@@ -220,7 +221,7 @@ DROP PROCEDURE IF EXISTS sp_close_employee_scd2_version;
 DELIMITER $$
 CREATE PROCEDURE sp_close_employee_scd2_version(
     IN p_employee_id BIGINT,
-    IN p_effective_date DATE
+    IN p_effective_date DATETIME
 )
 BEGIN
     UPDATE dim_employee

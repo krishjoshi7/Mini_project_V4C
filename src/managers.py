@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
+import logging
 from typing import Any
 
+from pymysql import Error as MySQLError
+
 from src.database.db_manager import DatabaseConnection
+from src.exceptions import (
+    DatabaseError,
+    DuplicateRecordError,
+    ForeignKeyConstraintError,
+    RecordNotFoundError,
+    ValidationError,
+    map_mysql_error,
+)
 from src.models import Employee, Project, Review
 from src.validators import (
     validate_allocation,
@@ -15,6 +26,8 @@ from src.validators import (
     validate_salary_hike,
 )
 
+logger = logging.getLogger("employee_analytics.managers")
+
 
 class EmployeeManager(DatabaseConnection):
     def list_departments(self) -> list[dict[str, Any]]:
@@ -23,24 +36,28 @@ class EmployeeManager(DatabaseConnection):
     def create_employee(self, employee: Employee) -> int:
         employee.validate()
         connection = self.get_connection()
-        cursor = self.execute(
-            """INSERT INTO employees
-               (first_name, last_name, email, department_id, job_title, hire_date, manager_id, salary, status)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                employee.first_name, employee.last_name, employee.email, employee.department_id,
-                employee.job_title, employee.hire_date or date.today(), employee.manager_id,
-                employee.salary, employee.status,
-            ),
-        )
+        cursor = connection.cursor()
         try:
-            employee.employee_id = int(cursor.lastrowid)
+            # Check department existence in warehouse first
             department = self.fetch_one(
                 "SELECT department_key FROM dim_department WHERE department_id = %s",
                 (employee.department_id,),
             )
             if department is None:
-                raise ValueError(f"Department {employee.department_id} does not exist in the warehouse.")
+                raise ValidationError(f"Department ID {employee.department_id} does not exist in the warehouse.")
+
+            cursor.execute(
+                """INSERT INTO employees
+                   (first_name, last_name, email, department_id, job_title, hire_date, manager_id, salary, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    employee.first_name, employee.last_name, employee.email, employee.department_id,
+                    employee.job_title, employee.hire_date or date.today(), employee.manager_id,
+                    employee.salary, employee.status,
+                ),
+            )
+            employee.employee_id = int(cursor.lastrowid)
+
             cursor.execute(
                 """INSERT INTO dim_employee
                    (employee_id, first_name, last_name, email, department_key, job_title,
@@ -49,26 +66,35 @@ class EmployeeManager(DatabaseConnection):
                 (
                     employee.employee_id, employee.first_name, employee.last_name, employee.email,
                     department["department_key"], employee.job_title, employee.hire_date or date.today(),
-                    employee.salary, date.today(),
+                    employee.salary, datetime.now(),
                 ),
             )
             connection.commit()
             return employee.employee_id
+        except MySQLError as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            logger.error("Database error while creating employee: %s", exc, exc_info=True)
+            raise map_mysql_error(exc, operation="create employee") from exc
         except Exception:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             raise
         finally:
             cursor.close()
 
     def update_department(self, employee_id: int, new_department_id: int) -> None:
+        if new_department_id < 1:
+            raise ValidationError("Department ID must be a positive integer.")
         self._apply_scd2_change(employee_id, department_id=new_department_id)
 
     def update_salary(self, employee_id: int, new_salary: float) -> None:
-        new_salary = validate_salary(float(new_salary))
-        employee = self.get_employee(employee_id)
-        if employee is None:
-            raise ValueError(f"Employee {employee_id} does not exist.")
-        validate_salary_hike(float(employee["salary"]), new_salary)
+        if new_salary <= 0:
+            raise ValidationError("Salary must be greater than zero.")
         self._apply_scd2_change(employee_id, salary=new_salary)
 
     def update_job_title(self, employee_id: int, new_job_title: str) -> None:
@@ -84,9 +110,11 @@ class EmployeeManager(DatabaseConnection):
         salary: float | None = None,
         job_title: str | None = None,
     ) -> None:
+        if employee_id < 1:
+            raise ValidationError("Employee ID must be a positive integer.")
         connection = self.get_connection()
         cursor = connection.cursor()
-        today = date.today()
+        effective_time = datetime.now()
         try:
             cursor.execute(
                 "SELECT * FROM employees WHERE employee_id = %s FOR UPDATE",
@@ -94,10 +122,10 @@ class EmployeeManager(DatabaseConnection):
             )
             employee = cursor.fetchone()
             if employee is None:
-                raise ValueError(f"Employee {employee_id} does not exist.")
+                raise RecordNotFoundError(f"Employee {employee_id} does not exist.")
+            if employee["status"] != "active":
+                raise ValidationError(f"Employee {employee_id} is inactive and cannot be updated.")
             next_department_id = department_id if department_id is not None else employee["department_id"]
-            if salary is not None:
-                validate_salary_hike(float(employee["salary"]), float(salary))
             next_salary = salary if salary is not None else employee["salary"]
             next_job_title = job_title if job_title is not None else employee["job_title"]
             cursor.execute(
@@ -106,17 +134,14 @@ class EmployeeManager(DatabaseConnection):
             )
             department = cursor.fetchone()
             if department is None:
-                raise ValueError(f"Department {next_department_id} does not exist.")
+                raise ValidationError(f"Department {next_department_id} does not exist.")
             cursor.execute(
                 "SELECT * FROM dim_employee WHERE employee_id = %s AND is_current = TRUE FOR UPDATE",
                 (employee_id,),
             )
             current = cursor.fetchone()
             if current is None:
-                raise ValueError(f"Current warehouse version for employee {employee_id} is missing.")
-            if current["start_date"] == today:
-                raise ValueError("An employee can have only one SCD2 change per day.")
-            # Skip write if nothing actually changed
+                raise ValidationError(f"Current warehouse version for employee {employee_id} is missing.")
             if (
                 current["department_key"] == department["department_key"]
                 and float(current["salary"]) == float(next_salary)
@@ -127,7 +152,7 @@ class EmployeeManager(DatabaseConnection):
             # Close current warehouse version
             cursor.execute(
                 "UPDATE dim_employee SET end_date = %s, is_current = FALSE WHERE employee_key = %s",
-                (today, current["employee_key"]),
+                (effective_time, current["employee_key"]),
             )
             # Update OLTP record
             cursor.execute(
@@ -142,13 +167,23 @@ class EmployeeManager(DatabaseConnection):
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, TRUE, 0)""",
                 (
                     employee_id, employee["first_name"], employee["last_name"], employee["email"],
-                    department["department_key"], next_job_title, employee["hire_date"],
-                    next_salary, today,
+                    department["department_key"], current["job_title"], employee["hire_date"],
+                    next_salary, effective_time,
                 ),
             )
             connection.commit()
+        except MySQLError as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            logger.error("Database error in _apply_scd2_change for employee %s: %s", employee_id, exc, exc_info=True)
+            raise map_mysql_error(exc, operation="update employee SCD2") from exc
         except Exception:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             raise
         finally:
             cursor.close()
@@ -161,6 +196,8 @@ class EmployeeManager(DatabaseConnection):
         )
 
     def get_employee(self, employee_id: int) -> dict[str, Any] | None:
+        if employee_id < 1:
+            raise ValidationError("Employee ID must be a positive integer.")
         return self.fetch_one(
             "SELECT * FROM employees WHERE employee_id = %s",
             (employee_id,)
@@ -168,6 +205,8 @@ class EmployeeManager(DatabaseConnection):
 
     def delete_employee(self, employee_id: int) -> None:
         """Deactivate an employee while preserving reviews, assignments, and SCD2 history."""
+        if employee_id < 1:
+            raise ValidationError("Employee ID must be a positive integer.")
         connection = self.get_connection()
         cursor = connection.cursor()
         today = date.today()
@@ -181,10 +220,10 @@ class EmployeeManager(DatabaseConnection):
             employee = cursor.fetchone()
 
             if employee is None:
-                raise ValueError(f"Employee {employee_id} does not exist.")
+                raise RecordNotFoundError(f"Employee {employee_id} does not exist.")
 
             if employee["status"] == "inactive":
-                raise ValueError(f"Employee {employee_id} is already inactive.")
+                raise ValidationError(f"Employee {employee_id} is already inactive.")
 
             # Lock the current warehouse version, if one exists.
             cursor.execute(
@@ -214,8 +253,18 @@ class EmployeeManager(DatabaseConnection):
             # Keep existing performance reviews and project assignments for history.
             connection.commit()
 
+        except MySQLError as exc:
+            try:
+                connection.rollback()
+            except Exception:
+                pass
+            logger.error("Database error while deactivating employee %s: %s", employee_id, exc, exc_info=True)
+            raise map_mysql_error(exc, operation="deactivate employee") from exc
         except Exception:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except Exception:
+                pass
             raise
         finally:
             cursor.close()
@@ -224,6 +273,13 @@ class EmployeeManager(DatabaseConnection):
 class ProjectManager(DatabaseConnection):
     def create_project(self, project: Project) -> int:
         project.validate()
+        dept = self.fetch_one(
+            "SELECT department_id FROM departments WHERE department_id = %s",
+            (project.department_id,),
+        )
+        if dept is None:
+            raise ValidationError(f"Department ID {project.department_id} does not exist.")
+
         cursor = self.execute(
             """INSERT INTO projects
                (project_name, department_id, budget, start_date, end_date, status)
@@ -253,10 +309,10 @@ class ProjectManager(DatabaseConnection):
             (employee_id,),
         )
         if employee is None:
-            raise ValueError(f"Employee {employee_id} does not exist.")
+            raise RecordNotFoundError(f"Employee {employee_id} does not exist.")
         if employee["status"] != "active":
-            raise ValueError(
-                f"Employee {employee_id} is inactive and cannot be assigned to a new project."
+            raise ValidationError(
+                f"Employee {employee_id} is inactive and cannot be assigned to a project."
             )
 
         project = self.fetch_one(
@@ -264,9 +320,9 @@ class ProjectManager(DatabaseConnection):
             (project_id,),
         )
         if project is None:
-            raise ValueError(f"Project {project_id} does not exist.")
+            raise RecordNotFoundError(f"Project {project_id} does not exist.")
         if project["status"] != "active":
-            raise ValueError(
+            raise ValidationError(
                 f"Project {project_id} is not active and cannot receive new assignments."
             )
 
@@ -283,6 +339,8 @@ class ProjectManager(DatabaseConnection):
         cursor.close()
 
     def get_project(self, project_id: int) -> dict[str, Any] | None:
+        if project_id < 1:
+            raise ValidationError("Project ID must be a positive integer.")
         return self.fetch_one("SELECT * FROM projects WHERE project_id = %s", (project_id,))
 
     def list_projects(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -297,12 +355,28 @@ class ProjectManager(DatabaseConnection):
         budget = validate_project_budget_change(float(current["budget"]), float(budget))
         cursor = self.execute(
             "UPDATE projects SET project_name = %s, budget = %s, status = %s WHERE project_id = %s",
-            (project_name, budget, status, project_id),
+            (project_name.strip(), budget, status, project_id),
             commit=True,
         )
         cursor.close()
 
     def delete_project(self, project_id: int) -> None:
+        if project_id < 1:
+            raise ValidationError("Project ID must be a positive integer.")
+        proj = self.get_project(project_id)
+        if proj is None:
+            raise RecordNotFoundError(f"Project {project_id} does not exist.")
+
+        # Check for active assignments to give a clean user-friendly message rather than a raw FK database error
+        assignment = self.fetch_one(
+            "SELECT COUNT(*) AS cnt FROM project_assignments WHERE project_id = %s",
+            (project_id,),
+        )
+        if assignment and assignment.get("cnt", 0) > 0:
+            raise ValidationError(
+                f"Cannot delete project '{proj['project_name']}' because active employee assignments are linked to it. Remove assignments first."
+            )
+
         cursor = self.execute("DELETE FROM projects WHERE project_id = %s", (project_id,), commit=True)
         cursor.close()
 
@@ -310,6 +384,13 @@ class ProjectManager(DatabaseConnection):
 class ReviewManager(DatabaseConnection):
     def create_review(self, review: Review) -> int:
         review.validate()
+        emp = self.fetch_one(
+            "SELECT employee_id FROM employees WHERE employee_id = %s",
+            (review.employee_id,),
+        )
+        if emp is None:
+            raise RecordNotFoundError(f"Employee {review.employee_id} does not exist.")
+
         cursor = self.execute(
             """INSERT INTO performance_reviews
                (employee_id, review_date, manager_id, overall_score, rating, comments)
@@ -326,16 +407,35 @@ class ReviewManager(DatabaseConnection):
             cursor.close()
 
     def get_review(self, review_id: int) -> dict[str, Any] | None:
+        if review_id < 1:
+            raise ValidationError("Review ID must be a positive integer.")
         return self.fetch_one("SELECT * FROM performance_reviews WHERE review_id = %s", (review_id,))
 
     def list_reviews(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.fetch_all("SELECT * FROM performance_reviews ORDER BY review_date DESC LIMIT %s", (limit,))
 
     def delete_review(self, review_id: int) -> None:
+        if review_id < 1:
+            raise ValidationError("Review ID must be a positive integer.")
+        rev = self.get_review(review_id)
+        if rev is None:
+            raise RecordNotFoundError(f"Review {review_id} does not exist.")
         cursor = self.execute("DELETE FROM performance_reviews WHERE review_id = %s", (review_id,), commit=True)
         cursor.close()
 
     def update_review(self, review_id: int, overall_score: float, rating: str, comments: str) -> None:
+        if review_id < 1:
+            raise ValidationError("Review ID must be a positive integer.")
+        if not 0 <= overall_score <= 100:
+            raise ValidationError("Overall score must be between 0 and 100.")
+        valid_ratings = {"Exceeds Expectations", "Strong", "Meets Expectations", "Needs Improvement"}
+        if rating not in valid_ratings:
+            raise ValidationError(f"Invalid rating '{rating}'.")
+
+        rev = self.get_review(review_id)
+        if rev is None:
+            raise RecordNotFoundError(f"Review {review_id} does not exist.")
+
         cursor = self.execute(
             "UPDATE performance_reviews SET overall_score = %s, rating = %s, comments = %s WHERE review_id = %s",
             (overall_score, rating, comments, review_id),
@@ -356,10 +456,10 @@ class AnalyticsManager(DatabaseConnection):
                 ON e.employee_id = f.employee_id AND e.is_current = TRUE""",
         }
         if department_basis not in employee_join:
-            raise ValueError("department_basis must be 'review' or 'current'")
+            raise ValidationError("department_basis must be 'review' or 'current'")
             
         where_clause = ""
-        params = []
+        params: list[Any] = []
         if department_name and department_name != "All departments":
             where_clause = "WHERE d.department_name = %s"
             params.append(department_name)
@@ -386,10 +486,10 @@ class AnalyticsManager(DatabaseConnection):
                 ON e.employee_id = f.employee_id AND e.is_current = TRUE""",
         }
         if department_basis not in employee_join:
-            raise ValueError("department_basis must be 'review' or 'current'")
+            raise ValidationError("department_basis must be 'review' or 'current'")
             
         where_clause = ""
-        params = []
+        params: list[Any] = []
         if department_name and department_name != "All departments":
             where_clause = "WHERE d.department_name = %s"
             params.append(department_name)
@@ -418,7 +518,7 @@ class AnalyticsManager(DatabaseConnection):
 
     def get_attrition_risk(self, department_name: str | None = None) -> list[dict[str, Any]]:
         where_clause = "WHERE e.is_current = TRUE"
-        params = []
+        params: list[Any] = []
         if department_name and department_name != "All departments":
             where_clause += " AND d.department_name = %s"
             params.append(department_name)
@@ -434,7 +534,7 @@ class AnalyticsManager(DatabaseConnection):
 
     def get_project_bottlenecks(self, department_name: str | None = None) -> list[dict[str, Any]]:
         where_clause = "WHERE p.status = 'active'"
-        params = []
+        params: list[Any] = []
         if department_name and department_name != "All departments":
             where_clause += " AND d.department_name = %s"
             params.append(department_name)
@@ -453,11 +553,15 @@ class AnalyticsManager(DatabaseConnection):
         return self.fetch_all(query, tuple(params) if params else None)
 
     def get_overview_metrics(self) -> dict[str, Any]:
-        total_employees = self.fetch_one("SELECT COUNT(*) as count FROM employees WHERE status = 'active'")["count"]
-        total_departments = self.fetch_one("SELECT COUNT(*) as count FROM departments")["count"]
+        total_emp_row = self.fetch_one("SELECT COUNT(*) as count FROM employees WHERE status = 'active'")
+        total_employees = total_emp_row["count"] if total_emp_row else 0
+
+        dept_row = self.fetch_one("SELECT COUNT(*) as count FROM departments")
+        total_departments = dept_row["count"] if dept_row else 0
+
         avg_score_row = self.fetch_one("SELECT AVG(overall_score) as avg_score FROM performance_reviews")
-        avg_score = float(avg_score_row["avg_score"]) if avg_score_row["avg_score"] is not None else 0.0
-        
+        avg_score = float(avg_score_row["avg_score"]) if (avg_score_row and avg_score_row["avg_score"] is not None) else 0.0
+
         distribution = self.fetch_all("""
             SELECT d.department_name, COUNT(e.employee_id) as size
             FROM employees e
@@ -465,12 +569,12 @@ class AnalyticsManager(DatabaseConnection):
             WHERE e.status = 'active'
             GROUP BY d.department_name
             ORDER BY size ASC
-        """)
-        
+        """) or []
+
         return {
             "total_employees": total_employees,
             "total_departments": total_departments,
             "average_score": avg_score,
-            "distribution": distribution
+            "distribution": distribution,
         }
-    #commenta
+

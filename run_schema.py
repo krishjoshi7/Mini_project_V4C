@@ -1,4 +1,3 @@
-"""Run schema.sql against the database configured in .env"""
 from pathlib import Path
 from dotenv import load_dotenv
 import os
@@ -54,33 +53,26 @@ def parse_sql_script(sql_text: str) -> list[str]:
             if stmt_text.endswith(delimiter):
                 stmt_text = stmt_text[:-len(delimiter)]
 
-            cleaned = stmt_text.strip()
-            if cleaned:
-                statements.append(cleaned)
-            current_lines = []
-
-    if current_lines:
-        cleaned = "\n".join(current_lines).strip()
-        if cleaned:
-            statements.append(cleaned)
-
-    return statements
-
-
-statements = parse_sql_script(schema_sql)
+# regular statements (before DELIMITER $$)
 cursor = conn.cursor()
 
 try:
     for stmt in statements:
         cursor.execute(stmt)
-        # Display clean summary of what was executed
-        summary = stmt.strip().split("\n")[0][:75]
-        print(f"  [OK] {summary}...")
+        print(f"  ✔ {stmt[:80]}...")
+conn.commit()
+
+#  stored procedure blocks 
+if len(parts) > 1:
+    for proc_block in parts[1:]:
+        proc_block = proc_block.replace("DELIMITER ;", "")
+        for proc in proc_block.split("$$"):
+            stmt = proc.strip()
+            if stmt:
+                cursor.execute(stmt)
+                print(f"  ✔ {stmt[:80]}...")
     conn.commit()
-    print("\n[SUCCESS] Schema and stored procedures created successfully!")
-except Exception:
-    conn.rollback()
-    raise
-finally:
-    cursor.close()
-    conn.close()
+
+cursor.close()
+conn.close()
+print("\n Schema created successfully!")
