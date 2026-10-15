@@ -121,6 +121,8 @@ def validate_name(value: str, field: str = "Name") -> str:
 
 def validate_email(value: str) -> str:
     """Validate and return a normalised (lowercased, stripped) email."""
+    if not isinstance(value, str):
+        raise ValueError("Email must be a text string.")
     value = value.strip().lower()
     if not value:
         raise ValueError("Email address is required.")
@@ -144,6 +146,8 @@ def validate_job_title(value: str, check_whitelist: bool = False) -> str:
             Set to True when the value comes from a dropdown; leave False
             for legacy free-text paths.
     """
+    if not isinstance(value, str):
+        raise ValueError("Job title must be a text string.")
     value = sanitize_text(value.strip())
     if not value:
         raise ValueError("Job title is required.")
@@ -195,9 +199,13 @@ def validate_salary_hike(current_salary: float, new_salary: float) -> float:
 
 def validate_project_name(value: str) -> str:
     """Validate and return a sanitised project name."""
+    if not isinstance(value, str):
+        raise ValueError("Project name must be a text string.")
     value = sanitize_text(value.strip())
     if not value:
         raise ValueError("Project name is required.")
+    if not any(character.isalpha() for character in value):
+        raise ValueError("Project name must contain at least one letter.")
     if len(value) > MAX_PROJECT_LEN:
         raise ValueError(f"Project name must be {MAX_PROJECT_LEN} characters or fewer.")
     if not _TITLE_RE.match(value):
@@ -249,12 +257,16 @@ def validate_score(value: float) -> float:
 
 def validate_rating(value: str) -> str:
     """Validate rating against the allowed set."""
+    if not isinstance(value, str):
+        raise ValueError("Rating must be a text string.")
     whitelist_check(value, VALID_RATINGS, "rating")
     return value
 
 
 def validate_project_status(value: str) -> str:
     """Validate project status against the allowed set."""
+    if not isinstance(value, str):
+        raise ValueError("Project status must be a text string.")
     whitelist_check(value, VALID_PROJECT_STATUSES, "project status")
     return value
 
@@ -276,6 +288,8 @@ def validate_date_range(start: date | None, end: date | None) -> None:
 
 def validate_comment(value: str) -> str:
     """Sanitise a free-text comment."""
+    if not isinstance(value, str):
+        raise ValueError("Comment must be a text string.")
     value = sanitize_text(value.strip())
     if len(value) > MAX_COMMENT_LEN:
         raise ValueError(f"Comment must be {MAX_COMMENT_LEN} characters or fewer.")

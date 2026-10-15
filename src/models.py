@@ -20,11 +20,20 @@ class Employee:
     status: str = "active"
 
     def validate(self) -> None:
-        if not self.first_name.strip() or not self.last_name.strip():
-            raise ValidationError("Employee name is required.")
-        if "@" not in self.email:
-            raise ValidationError("Enter a valid email address.")
-        if self.department_id < 1 or self.salary <= 0:
+        from src.validators import validate_email, validate_job_title, validate_name, validate_salary
+
+        try:
+            self.first_name = validate_name(self.first_name, "First name")
+            self.last_name = validate_name(self.last_name, "Last name")
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        try:
+            self.email = validate_email(self.email)
+            self.job_title = validate_job_title(self.job_title)
+            self.salary = validate_salary(float(self.salary))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        if not isinstance(self.department_id, int) or isinstance(self.department_id, bool) or self.department_id < 1:
             raise ValidationError("Department and salary must be valid positive values.")
 
 
@@ -39,9 +48,15 @@ class Project:
     status: str = "active"
 
     def validate(self) -> None:
-        if not self.project_name.strip():
-            raise ValidationError("Project name is required.")
-        if self.department_id < 1 or self.budget < 0:
+        from src.validators import validate_project_name, validate_project_status, validate_project_budget_change
+
+        try:
+            self.project_name = validate_project_name(self.project_name)
+            validate_project_status(self.status)
+            validate_project_budget_change(0, float(self.budget))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
+        if not isinstance(self.department_id, int) or isinstance(self.department_id, bool) or self.department_id < 1:
             raise ValidationError("Department must be positive and budget cannot be negative.")
 
 
@@ -55,8 +70,14 @@ class Review:
     manager_id: int | None = None
 
     def validate(self) -> None:
-        if self.employee_id < 1:
+        from src.validators import validate_comment, validate_rating, validate_score
+
+        if not isinstance(self.employee_id, int) or isinstance(self.employee_id, bool) or self.employee_id < 1:
             raise ValidationError("Employee ID is required.")
-        if not 0 <= self.overall_score <= 100:
-            raise ValidationError("Review score must be between 0 and 100.")
+        try:
+            validate_score(float(self.overall_score))
+            validate_rating(self.rating)
+            validate_comment(self.comments)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(str(exc)) from exc
 

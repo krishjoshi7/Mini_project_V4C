@@ -52,27 +52,24 @@ def parse_sql_script(sql_text: str) -> list[str]:
             stmt_text = "\n".join(current_lines).rstrip()
             if stmt_text.endswith(delimiter):
                 stmt_text = stmt_text[:-len(delimiter)]
+            if stmt_text.strip():
+                statements.append(stmt_text.strip())
+            current_lines = []
 
-# regular statements (before DELIMITER $$)
+    if current_lines and "\n".join(current_lines).strip():
+        statements.append("\n".join(current_lines).strip())
+
+    return statements
+
+
 cursor = conn.cursor()
-
 try:
-    for stmt in statements:
-        cursor.execute(stmt)
-        print(f"  ✔ {stmt[:80]}...")
-conn.commit()
-
-#  stored procedure blocks 
-if len(parts) > 1:
-    for proc_block in parts[1:]:
-        proc_block = proc_block.replace("DELIMITER ;", "")
-        for proc in proc_block.split("$$"):
-            stmt = proc.strip()
-            if stmt:
-                cursor.execute(stmt)
-                print(f"  ✔ {stmt[:80]}...")
+    for statement in parse_sql_script(schema_sql):
+        cursor.execute(statement)
+        print(f"  ✔ {statement[:80]}...")
     conn.commit()
+finally:
+    cursor.close()
+    conn.close()
 
-cursor.close()
-conn.close()
 print("\n Schema created successfully!")

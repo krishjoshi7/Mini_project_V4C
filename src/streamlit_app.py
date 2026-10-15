@@ -28,7 +28,13 @@ from src.ui.theme import (
     status_badge,
     style_fig,
 )
-from src.auth.authenticator import require_auth, logout
+from src.auth.authenticator import (
+    ASSIGNABLE_ROLES,
+    list_access_accounts,
+    require_auth,
+    logout,
+    set_user_role,
+)
 from src.auth import rbac
 from src.validators import (
     validate_employee_form,
@@ -48,7 +54,7 @@ _user = require_auth()
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 ALL_PAGES   = ["Overview", "Employee Management", "Project Management", "Performance Reviews", "Analytics Dashboard"]
-PAGE_ICONS  = {"Overview": " ", "Employee Management": " ", "Project Management": " ", "Performance Reviews": " ", "Analytics Dashboard": " "}
+PAGE_ICONS  = {"Overview": " ", "Employee Management": " ", "Project Management": " ", "Performance Reviews": " ", "Analytics Dashboard": " ", "User Access Management": " "}
 # Filter pages down to what the current role can access
 PAGES = rbac.allowed_pages(_user["role"], _user.get("department_name"))
 
@@ -298,7 +304,7 @@ def render_employees() -> None:
             else:
                 employee = Employee(first_name=first_name, last_name=last_name, email=email, department_id=department_id, job_title=job_title, salary=float(salary))
                 try:
-                    employee_id = EmployeeManager().create_employee(employee)
+                    employee_id = EmployeeManager().create_employee(employee, dept_scope)
                     # Auto-create login account with the password HR entered
                     from src.auth.authenticator import create_account
                     create_account(employee_id, initial_password)
@@ -321,7 +327,7 @@ def render_employees() -> None:
         
         if search_btn:
             try:
-                emp = EmployeeManager().get_employee(search_id)
+                emp = EmployeeManager().get_employee(search_id, dept_scope)
                 if emp:
                     st.session_state["selected_employee"] = emp
                 else:
@@ -401,10 +407,10 @@ def render_employees() -> None:
                                 mgr = EmployeeManager()
                                 changed = False
                                 if int(new_dept_id) != int(emp["department_id"]):
-                                    mgr.update_department(emp["employee_id"], int(new_dept_id))
+                                    mgr.update_department(emp["employee_id"], int(new_dept_id), dept_scope)
                                     changed = True
                                 if new_job_title != emp["job_title"]:
-                                    mgr.update_job_title(emp["employee_id"], new_job_title)
+                                    mgr.update_job_title(emp["employee_id"], new_job_title, dept_scope)
                                     changed = True
                                 if changed:
                                     st.success("Department / role updated. (SCD2 applied)")
@@ -440,7 +446,7 @@ def render_employees() -> None:
                                 st.info("No change to salary.")
                             else:
                                 try:
-                                    EmployeeManager().update_salary(emp["employee_id"], float(new_salary))
+                                    EmployeeManager().update_salary(emp["employee_id"], float(new_salary), dept_scope)
                                     st.success("Salary updated. (SCD2 applied)")
                                     st.session_state["selected_employee"] = EmployeeManager().get_employee(emp["employee_id"])
                                     st.rerun()
@@ -468,7 +474,7 @@ def render_employees() -> None:
                             use_container_width=True,
                         ):
                             try:
-                                EmployeeManager().delete_employee(emp["employee_id"])
+                                EmployeeManager().delete_employee(emp["employee_id"], dept_scope)
                                 st.success(
                                     f"{emp['first_name']} {emp['last_name']} has been deactivated. "
                                     "Historical records have been preserved."
@@ -536,7 +542,10 @@ def render_projects() -> None:
                     st.error(err)
             else:
                 try:
-                    project_id = ProjectManager().create_project(Project(project_name=project_name, department_id=department_id, budget=float(budget)))
+                    project_id = ProjectManager().create_project(
+                        Project(project_name=project_name, department_id=department_id, budget=float(budget)),
+                        department_id=dept_scope,
+                    )
                     render_form_message(f"Project {project_id} created.", True)
                 except Exception as exc:
                     render_form_message(f"Project could not be created: {exc}", False)
@@ -559,7 +568,7 @@ def render_projects() -> None:
             # Dept Managers may only assign employees from their own department
             if dept_scope is not None:
                 try:
-                    target_emp = EmployeeManager().get_employee(int(assign_emp_id))
+                    target_emp = EmployeeManager().get_employee(int(assign_emp_id), dept_scope)
                     if target_emp is None:
                         st.error("Employee not found.")
                         st.stop()
@@ -573,7 +582,9 @@ def render_projects() -> None:
                     st.error(f"Could not verify employee: {exc}")
                     st.stop()
             try:
-                ProjectManager().assign_employee(int(assign_emp_id), int(assign_proj_id), float(allocation))
+                ProjectManager().assign_employee(
+                    int(assign_emp_id), int(assign_proj_id), float(allocation), department_id=dept_scope
+                )
                 render_form_message("Project allocation saved.", True)
             except Exception as exc:
                 render_form_message(f"Allocation could not be saved: {user_facing_error(exc)}", False)
@@ -588,7 +599,7 @@ def render_projects() -> None:
                 
         if search_pbtn:
             try:
-                proj = ProjectManager().get_project(search_pid)
+                proj = ProjectManager().get_project(search_pid, dept_scope)
                 if proj:
                     st.session_state["selected_project"] = proj
                 else:
@@ -615,10 +626,19 @@ def render_projects() -> None:
                     
             if update_btn:
                 try:
-                    ProjectManager().update_project(proj["project_id"], new_name, float(new_budget), new_status)
-                    st.success("Project updated successfully!")
-                    st.session_state["selected_project"] = ProjectManager().get_project(proj["project_id"])
-                    st.rerun()
+                    errors = validate_project_update_form(
+                        new_name, float(proj["budget"]), float(new_budget), new_status
+                    )
+                    if errors:
+                        for error in errors:
+                            st.error(error)
+                    else:
+                        ProjectManager().update_project(
+                            proj["project_id"], new_name, float(new_budget), new_status, dept_scope
+                        )
+                        st.success("Project updated successfully!")
+                        st.session_state["selected_project"] = ProjectManager().get_project(proj["project_id"], dept_scope)
+                        st.rerun()
                 except Exception as exc:
                     st.error(f"Failed to update project: {user_facing_error(exc)}")
                     
@@ -626,15 +646,33 @@ def render_projects() -> None:
                 section_title("Danger zone")
                 if st.button("Delete project", type="primary", key="del_proj"):
                     try:
-                        ProjectManager().update_project(proj["project_id"], new_name, float(new_budget), new_status)
-                        st.success("Project updated successfully!")
-                        st.session_state["selected_project"] = ProjectManager().get_project(proj["project_id"])
+                        ProjectManager().delete_project(proj["project_id"], dept_scope)
+                        st.success("Project deleted.")
+                        st.session_state.pop("selected_project", None)
                         st.rerun()
                     except Exception as exc:
                         st.error(f"Failed to delete project: {user_facing_error(exc)}")
 
 def render_reviews() -> None:
     page_header("Performance <span class='gradient-text'>reviews</span>", "Capture a clear, consistent view of employee performance")
+
+    if _user["role"] == "Employee":
+        st.info("You can view your own performance reviews in read-only mode.")
+        try:
+            reviews = ReviewManager().list_reviews_for_employee(_user["employee_id"])
+            if reviews:
+                display_reviews = pd.DataFrame(reviews)
+                display_reviews = display_reviews[
+                    ["review_date", "overall_score", "rating", "comments"]
+                ]
+                display_reviews.columns = ["Review date", "Score", "Rating", "Comments"]
+                st.dataframe(display_reviews, hide_index=True, use_container_width=True)
+            else:
+                st.info("No performance reviews are available yet.")
+        except Exception as exc:
+            st.error(f"Unable to load your reviews: {user_facing_error(exc)}")
+        return
+
     create_tab, manage_tab = st.tabs(["Create review", "Manage reviews"])
     
     with create_tab:
@@ -653,6 +691,11 @@ def render_reviews() -> None:
                 comments = st.text_area("Manager comments", height=130)
                 submit_review = st.form_submit_button("Save review", type="primary", use_container_width=True)
         if submit_review:
+            if _user["role"] == "Department Manager":
+                employee = EmployeeManager().get_employee(int(employee_id), _user["department_id"])
+                if employee is None:
+                    st.error("You can only create reviews for employees in your department.")
+                    return
             errors = validate_review_form(int(employee_id), float(score), rating, comments)
             if errors:
                 for err in errors:
@@ -862,6 +905,72 @@ def render_analytics() -> None:
             st.dataframe(display_bottlenecks, hide_index=True, use_container_width=True)
 
 
+def render_user_access() -> None:
+    """Allow Super Admins to assign application roles to active employees."""
+    page_header("User <span class='gradient-text'>access</span>", "Assign roles and manage application access")
+    st.info(
+        "Super Admin is assigned from the command line. This screen manages HR Admin, "
+        "Department Manager, Analyst, and Employee roles. Only one Department Manager "
+        "can be active in each department."
+    )
+
+    try:
+        accounts = list_access_accounts()
+    except Exception as exc:
+        st.error(f"Unable to load user accounts: {user_facing_error(exc)}")
+        return
+
+    if not accounts:
+        st.info("No active employees are available.")
+        return
+
+    employee_id = st.number_input(
+        "Employee ID",
+        min_value=1,
+        step=1,
+        value=1,
+        format="%d",
+        help="Enter the employee ID whose application access you want to manage.",
+    )
+    selected = next(
+        (row for row in accounts if row["employee_id"] == int(employee_id)),
+        None,
+    )
+    if selected is None:
+        st.info("Enter an active employee ID to view and manage that employee's access.")
+        return
+
+    st.caption(f"Account: {selected['email']} · {selected['first_name']} {selected['last_name']}")
+    current_role = selected["forced_role"] or "Resolved from job title"
+
+    with st.form("assign_user_role_form"):
+        st.write(
+            f"**Department:** {selected['department_name']}  ·  "
+            f"**Job title:** {selected['job_title']}  ·  **Current access:** {current_role}"
+        )
+        role_options = list(ASSIGNABLE_ROLES)
+        role_index = role_options.index(current_role) if current_role in role_options else 0
+        new_role = st.selectbox("Application role", role_options, index=role_index)
+        password = st.text_input(
+            "New password (required for employees without an account)",
+            type="password",
+            help="Leave blank to keep the existing password.",
+        )
+        save_role = st.form_submit_button("Save access", type="primary", use_container_width=True)
+
+    if save_role:
+        try:
+            set_user_role(
+                selected["employee_id"],
+                new_role,
+                password or None,
+            )
+            st.success(f"Access updated for {selected['email']}: {new_role}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Access could not be updated: {user_facing_error(exc)}")
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 st.sidebar.markdown('<div class="brand-mark"><span>V4C</span>.ai</div>', unsafe_allow_html=True)
 
@@ -926,6 +1035,8 @@ elif page == "Project Management":
     render_projects()
 elif page == "Performance Reviews":
     render_reviews()
+elif page == "User Access Management":
+    render_user_access()
 else:
     render_analytics()
 

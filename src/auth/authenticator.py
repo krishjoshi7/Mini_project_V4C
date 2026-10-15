@@ -5,6 +5,15 @@ import bcrypt
 import streamlit as st
 
 from src.database.db_manager import DatabaseConnection
+from src.exceptions import ValidationError
+
+
+ASSIGNABLE_ROLES: tuple[str, ...] = (
+    "HR Admin",
+    "Department Manager",
+    "Analyst",
+    "Employee",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +181,104 @@ def require_auth() -> dict:
 # ---------------------------------------------------------------------------
 # Account management (used by Super Admin panel)
 # ---------------------------------------------------------------------------
+
+def list_access_accounts() -> list[dict]:
+    """Return active employees and their current account role assignments."""
+    return _db.fetch_all(
+        """
+        SELECT e.employee_id, e.first_name, e.last_name, e.email,
+               e.department_id, d.department_name, e.job_title,
+               ua.account_id, ua.is_active, ua.forced_role
+        FROM employees e
+        JOIN departments d ON d.department_id = e.department_id
+        LEFT JOIN user_accounts ua ON ua.employee_id = e.employee_id
+        WHERE e.status = 'active'
+        ORDER BY e.employee_id
+        """
+    )
+
+
+def set_user_role(
+    employee_id: int,
+    role: str | None,
+    plain_password: str | None = None,
+) -> None:
+    """Assign a UI-managed role and enforce one Department Manager per department.
+
+    ``role=None`` means Automatic: remove a UI override and resolve from the
+    employee's job title and department at the next login. Super Admin is
+    intentionally excluded because it remains a CLI-only role.
+    """
+    if role is not None and role not in ASSIGNABLE_ROLES:
+        raise ValidationError("This role cannot be assigned from the web UI.")
+
+    employee = _db.fetch_one(
+        """
+        SELECT employee_id, department_id, status
+        FROM employees
+        WHERE employee_id = %s
+        """,
+        (employee_id,),
+    )
+    if employee is None:
+        raise ValidationError(f"Employee {employee_id} does not exist.")
+    if employee["status"] != "active":
+        raise ValidationError("Only active employees can receive an application role.")
+
+    if role == "Department Manager":
+        existing = _db.fetch_one(
+            """
+            SELECT ua.employee_id
+            FROM user_accounts ua
+            JOIN employees e ON e.employee_id = ua.employee_id
+                WHERE (
+                    ua.forced_role = 'Department Manager'
+                    OR (
+                                        ua.forced_role IS NULL
+                                        AND EXISTS (
+                                                SELECT 1
+                                                FROM role_rules rr
+                                                WHERE rr.role_name = 'Department Manager'
+                                                    AND (rr.department_id IS NULL OR rr.department_id = e.department_id)
+                                                    AND e.job_title LIKE rr.title_pattern
+                                                    AND rr.priority = (
+                                                            SELECT MIN(rr2.priority)
+                                                            FROM role_rules rr2
+                                                            WHERE (rr2.department_id IS NULL OR rr2.department_id = e.department_id)
+                                                                AND e.job_title LIKE rr2.title_pattern
+                                                        )
+                                                    )
+                                        )
+                             )
+                            AND e.department_id = %s
+              AND e.employee_id <> %s
+              AND ua.is_active = TRUE
+            LIMIT 1
+            """,
+            (employee["department_id"], employee_id),
+        )
+        if existing is not None:
+            raise ValidationError(
+                f"Department {employee['department_id']} already has a Department Manager."
+            )
+
+    account = _db.fetch_one(
+        "SELECT account_id FROM user_accounts WHERE employee_id = %s",
+        (employee_id,),
+    )
+    if account is None and not plain_password:
+        raise ValidationError("A password is required when creating a new login account.")
+
+    if account is None:
+        create_account(employee_id, plain_password or "", forced_role=role)
+    else:
+        if plain_password:
+            change_password(employee_id, plain_password)
+        _db.execute(
+            "UPDATE user_accounts SET forced_role = %s, is_active = TRUE WHERE employee_id = %s",
+            (role, employee_id),
+            commit=True,
+        )
 
 def create_account(employee_id: int, plain_password: str, forced_role: str | None = None) -> None:
     """Create a user_account row for *employee_id*.

@@ -33,8 +33,10 @@ class EmployeeManager(DatabaseConnection):
     def list_departments(self) -> list[dict[str, Any]]:
         return self.fetch_all("SELECT department_id, department_name FROM departments ORDER BY department_name")
 
-    def create_employee(self, employee: Employee) -> int:
+    def create_employee(self, employee: Employee, department_id: int | None = None) -> int:
         employee.validate()
+        if department_id is not None and employee.department_id != department_id:
+            raise ValidationError("You can only create employees in your department.")
         connection = self.get_connection()
         cursor = connection.cursor()
         try:
@@ -87,21 +89,29 @@ class EmployeeManager(DatabaseConnection):
         finally:
             cursor.close()
 
-    def update_department(self, employee_id: int, new_department_id: int) -> None:
+    def update_department(
+        self, employee_id: int, new_department_id: int, scope_department_id: int | None = None
+    ) -> None:
         if new_department_id < 1:
             raise ValidationError("Department ID must be a positive integer.")
-        self._apply_scd2_change(employee_id, department_id=new_department_id)
+        self._apply_scd2_change(
+            employee_id, department_id=new_department_id, scope_department_id=scope_department_id
+        )
 
-    def update_salary(self, employee_id: int, new_salary: float) -> None:
+    def update_salary(
+        self, employee_id: int, new_salary: float, scope_department_id: int | None = None
+    ) -> None:
         if new_salary <= 0:
             raise ValidationError("Salary must be greater than zero.")
-        self._apply_scd2_change(employee_id, salary=new_salary)
+        self._apply_scd2_change(employee_id, salary=new_salary, scope_department_id=scope_department_id)
 
-    def update_job_title(self, employee_id: int, new_job_title: str) -> None:
+    def update_job_title(
+        self, employee_id: int, new_job_title: str, scope_department_id: int | None = None
+    ) -> None:
         """Update the job title and record an SCD2 change in the warehouse."""
         from src.validators import validate_job_title
         new_job_title = validate_job_title(new_job_title)
-        self._apply_scd2_change(employee_id, job_title=new_job_title)
+        self._apply_scd2_change(employee_id, job_title=new_job_title, scope_department_id=scope_department_id)
 
     def _apply_scd2_change(
         self,
@@ -109,6 +119,7 @@ class EmployeeManager(DatabaseConnection):
         department_id: int | None = None,
         salary: float | None = None,
         job_title: str | None = None,
+        scope_department_id: int | None = None,
     ) -> None:
         if employee_id < 1:
             raise ValidationError("Employee ID must be a positive integer.")
@@ -125,6 +136,8 @@ class EmployeeManager(DatabaseConnection):
                 raise RecordNotFoundError(f"Employee {employee_id} does not exist.")
             if employee["status"] != "active":
                 raise ValidationError(f"Employee {employee_id} is inactive and cannot be updated.")
+            if scope_department_id is not None and employee["department_id"] != scope_department_id:
+                raise ValidationError("You can only update employees in your department.")
             next_department_id = department_id if department_id is not None else employee["department_id"]
             next_salary = salary if salary is not None else employee["salary"]
             next_job_title = job_title if job_title is not None else employee["job_title"]
@@ -195,15 +208,17 @@ class EmployeeManager(DatabaseConnection):
             (limit,),
         )
 
-    def get_employee(self, employee_id: int) -> dict[str, Any] | None:
+    def get_employee(self, employee_id: int, department_id: int | None = None) -> dict[str, Any] | None:
         if employee_id < 1:
             raise ValidationError("Employee ID must be a positive integer.")
-        return self.fetch_one(
-            "SELECT * FROM employees WHERE employee_id = %s",
-            (employee_id,)
-        )
+        query = "SELECT * FROM employees WHERE employee_id = %s"
+        params: list[Any] = [employee_id]
+        if department_id is not None:
+            query += " AND department_id = %s"
+            params.append(department_id)
+        return self.fetch_one(query, tuple(params))
 
-    def delete_employee(self, employee_id: int) -> None:
+    def delete_employee(self, employee_id: int, scope_department_id: int | None = None) -> None:
         """Deactivate an employee while preserving reviews, assignments, and SCD2 history."""
         if employee_id < 1:
             raise ValidationError("Employee ID must be a positive integer.")
@@ -221,6 +236,9 @@ class EmployeeManager(DatabaseConnection):
 
             if employee is None:
                 raise RecordNotFoundError(f"Employee {employee_id} does not exist.")
+
+            if scope_department_id is not None and employee["department_id"] != scope_department_id:
+                raise ValidationError("You can only deactivate employees in your department.")
 
             if employee["status"] == "inactive":
                 raise ValidationError(f"Employee {employee_id} is already inactive.")
@@ -271,8 +289,10 @@ class EmployeeManager(DatabaseConnection):
 
 
 class ProjectManager(DatabaseConnection):
-    def create_project(self, project: Project) -> int:
+    def create_project(self, project: Project, department_id: int | None = None) -> int:
         project.validate()
+        if department_id is not None and project.department_id != department_id:
+            raise ValidationError("You can only create projects in your department.")
         dept = self.fetch_one(
             "SELECT department_id FROM departments WHERE department_id = %s",
             (project.department_id,),
@@ -301,6 +321,7 @@ class ProjectManager(DatabaseConnection):
         employee_id: int,
         project_id: int,
         allocation_pct: float = 100,
+        department_id: int | None = None,
     ) -> None:
         allocation_pct = validate_allocation(allocation_pct)
 
@@ -325,6 +346,19 @@ class ProjectManager(DatabaseConnection):
             raise ValidationError(
                 f"Project {project_id} is not active and cannot receive new assignments."
             )
+        if department_id is not None:
+            employee_department = self.fetch_one(
+                "SELECT department_id FROM employees WHERE employee_id = %s",
+                (employee_id,),
+            )
+            if employee_department["department_id"] != department_id:
+                raise ValidationError("You can only assign employees from your department.")
+            project_department = self.fetch_one(
+                "SELECT department_id FROM projects WHERE project_id = %s",
+                (project_id,),
+            )
+            if project_department["department_id"] != department_id:
+                raise ValidationError("You can only assign employees to projects in your department.")
 
         cursor = self.execute(
             """INSERT INTO project_assignments
@@ -338,20 +372,35 @@ class ProjectManager(DatabaseConnection):
         )
         cursor.close()
 
-    def get_project(self, project_id: int) -> dict[str, Any] | None:
+    def get_project(self, project_id: int, department_id: int | None = None) -> dict[str, Any] | None:
         if project_id < 1:
             raise ValidationError("Project ID must be a positive integer.")
-        return self.fetch_one("SELECT * FROM projects WHERE project_id = %s", (project_id,))
+        query = "SELECT * FROM projects WHERE project_id = %s"
+        params: list[Any] = [project_id]
+        if department_id is not None:
+            query += " AND department_id = %s"
+            params.append(department_id)
+        return self.fetch_one(query, tuple(params))
 
     def list_projects(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.fetch_all("SELECT * FROM projects ORDER BY project_id DESC LIMIT %s", (limit,))
 
-    def update_project(self, project_id: int, project_name: str, budget: float, status: str) -> None:
-        project_name = validate_project_name(project_name)
-        validate_project_status(status)
-        current = self.get_project(project_id)
+    def update_project(
+        self,
+        project_id: int,
+        project_name: str,
+        budget: float,
+        status: str,
+        department_id: int | None = None,
+    ) -> None:
+        try:
+            project_name = validate_project_name(project_name)
+            validate_project_status(status)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        current = self.get_project(project_id, department_id)
         if current is None:
-            raise ValueError(f"Project {project_id} does not exist.")
+            raise RecordNotFoundError(f"Project {project_id} does not exist in your department.")
         budget = validate_project_budget_change(float(current["budget"]), float(budget))
         cursor = self.execute(
             "UPDATE projects SET project_name = %s, budget = %s, status = %s WHERE project_id = %s",
@@ -360,10 +409,10 @@ class ProjectManager(DatabaseConnection):
         )
         cursor.close()
 
-    def delete_project(self, project_id: int) -> None:
+    def delete_project(self, project_id: int, department_id: int | None = None) -> None:
         if project_id < 1:
             raise ValidationError("Project ID must be a positive integer.")
-        proj = self.get_project(project_id)
+        proj = self.get_project(project_id, department_id)
         if proj is None:
             raise RecordNotFoundError(f"Project {project_id} does not exist.")
 
@@ -413,6 +462,15 @@ class ReviewManager(DatabaseConnection):
 
     def list_reviews(self, limit: int = 100) -> list[dict[str, Any]]:
         return self.fetch_all("SELECT * FROM performance_reviews ORDER BY review_date DESC LIMIT %s", (limit,))
+
+    def list_reviews_for_employee(self, employee_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        if employee_id < 1:
+            raise ValidationError("Employee ID must be a positive integer.")
+        return self.fetch_all(
+            "SELECT * FROM performance_reviews WHERE employee_id = %s "
+            "ORDER BY review_date DESC LIMIT %s",
+            (employee_id, limit),
+        )
 
     def delete_review(self, review_id: int) -> None:
         if review_id < 1:

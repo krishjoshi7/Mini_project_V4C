@@ -5,6 +5,10 @@ import unittest
 from src.models import Employee
 from src.validators import (
     validate_name,
+    validate_job_title,
+    validate_project_name,
+    validate_project_status,
+    validate_rating,
     validate_salary_hike,
     validate_project_budget_change,
     validate_employee_salary_update,
@@ -13,6 +17,30 @@ from src.validators import (
 
 
 class ValidationRulesTests(unittest.TestCase):
+    def test_text_fields_reject_integer_values(self):
+        invalid_values = [123, 0, 45.6]
+        for invalid_value in invalid_values:
+            with self.subTest(value=invalid_value):
+                with self.assertRaises(ValueError):
+                    validate_name(invalid_value, "First name")
+                with self.assertRaises(ValueError):
+                    validate_project_name(invalid_value)
+                with self.assertRaises(ValueError):
+                    validate_job_title(invalid_value)
+                with self.assertRaises(ValueError):
+                    validate_rating(invalid_value)
+                with self.assertRaises(ValueError):
+                    validate_project_status(invalid_value)
+
+    def test_project_name_accepts_numbers_when_containing_letters(self):
+        self.assertEqual(validate_project_name("Apollo 2"), "Apollo 2")
+
+    def test_project_name_rejects_numeric_only_text(self):
+        for numeric_name in ("123", "45.6"):
+            with self.subTest(name=numeric_name):
+                with self.assertRaises(ValueError):
+                    validate_project_name(numeric_name)
+
     # ── 1. Employee Name Validation ───────────────────────────────────────────
     def test_name_accepts_letters_and_spaces(self):
         self.assertEqual(validate_name("Alice", "First name"), "Alice")
